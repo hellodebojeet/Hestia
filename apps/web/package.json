@@ -1,0 +1,25 @@
+{
+  "name": "@hestia/web",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hestia/ui": "workspace:^",
+    "@tanstack/react-query": "^5.0.0",
+    "next": "^14.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "autoprefixer": "^10.6.1",
+    "postcss": "^8.5.30",
+    "tailwindcss": "^3.4.1"
+  }
+}

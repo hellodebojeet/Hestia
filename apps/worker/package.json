@@ -1,0 +1,20 @@
+{
+  "name": "@hestia/worker",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hestia/cache": "workspace:^",
+    "@hestia/database": "workspace:*",
+    "@hestia/env": "workspace:*",
+    "@prisma/client": "^5.14.0",
+    "bullmq": "^5.0.0",
+    "ioredis": "^5.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5"
+  }
+}

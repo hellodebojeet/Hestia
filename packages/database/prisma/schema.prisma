@@ -1,0 +1,482 @@
+// Hestia primary database — single PostgreSQL, single Prisma schema.
+// Covers: identity, profiles, friendships/follows/blocks, posts/comments/reactions,
+// stories (24h TTL), media (S3/R2 direct upload), feed entries (Redis ZSET backing),
+// notifications, messaging, groups/pages (stage 2), moderation, audit.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Identity ----------
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+model User {
+  id              String     @id @default(cuid())
+  email           String     @unique
+  emailVerifiedAt DateTime?
+  passwordHash    String
+  status          UserStatus @default(ACTIVE)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  deletedAt       DateTime?
+
+  profile         Profile?
+  sessions        AuthSession[]
+  passwordResets  PasswordResetToken[]
+  emailTokens     EmailVerificationToken[]
+  posts           Post[]
+  comments        Comment[]
+  reactions       Reaction[]
+  stories         Story[]
+  storyViews      StoryView[]
+  mediaAssets     MediaAsset[]
+  feedEntries     FeedEntry[]               @relation("FeedOwner")
+  authoredEntries FeedEntry[]               @relation("FeedAuthor")
+  notifications   Notification[]            @relation("NotificationRecipient")
+  sentNotes       Notification[]            @relation("NotificationActor")
+  sentRequests    Friendship[]              @relation("FriendRequester")
+  receivedReqs    Friendship[]              @relation("FriendAddressee")
+  following       Follow[]                  @relation("FollowFollower")
+  followers       Follow[]                  @relation("FollowFollowing")
+  blocking        Block[]                   @relation("BlockBlocker")
+  blockedBy       Block[]                   @relation("BlockBlocked")
+  participants    ConversationParticipant[]
+  messages        Message[]
+  groupMembers    GroupMember[]
+  ownedGroups     Group[]                   @relation("GroupOwner")
+  ownedPages      Page[]                    @relation("PageOwner")
+  pageFollows     PageFollower[]
+  savedItems      SavedItem[]
+  reports         Report[]
+  auditLogs       AuditLog[]                @relation("AuditActor")
+
+  @@index([status])
+}
+
+model AuthSession {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+  ip        String?
+  userAgent String?
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ---------- Profiles ----------
+
+enum ProfileVisibility {
+  PUBLIC
+  FRIENDS
+  PRIVATE
+}
+
+model Profile {
+  userId        String            @id
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  username      String            @unique
+  displayName   String
+  bio           String            @default("")
+  avatarMediaId String?
+  avatar        MediaAsset?       @relation("AvatarMedia", fields: [avatarMediaId], references: [id], onDelete: SetNull)
+  coverMediaId  String?
+  cover         MediaAsset?       @relation("CoverMedia", fields: [coverMediaId], references: [id], onDelete: SetNull)
+  visibility    ProfileVisibility @default(PUBLIC)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+}
+
+// ---------- Social graph ----------
+
+enum FriendshipStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELLED
+}
+
+model Friendship {
+  id          String           @id @default(cuid())
+  requesterId String
+  requester   User             @relation("FriendRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  addresseeId String
+  addressee   User             @relation("FriendAddressee", fields: [addresseeId], references: [id], onDelete: Cascade)
+  status      FriendshipStatus @default(PENDING)
+  createdAt   DateTime         @default(now())
+  respondedAt DateTime?
+
+  @@unique([requesterId, addresseeId])
+  @@index([addresseeId, status])
+  @@index([requesterId, status])
+}
+
+model Follow {
+  followerId  String
+  follower    User     @relation("FollowFollower", fields: [followerId], references: [id], onDelete: Cascade)
+  followingId String
+  following   User     @relation("FollowFollowing", fields: [followingId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+
+  @@id([followerId, followingId])
+}
+
+model Block {
+  blockerId String
+  blocker   User     @relation("BlockBlocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blockedId String
+  blocked   User     @relation("BlockBlocked", fields: [blockedId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([blockerId, blockedId])
+}
+
+// ---------- Posts / comments / reactions ----------
+
+enum PostAudience {
+  PUBLIC
+  FRIENDS
+  ONLY_ME
+}
+
+model Post {
+  id        String       @id @default(cuid())
+  authorId  String
+  author    User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  audience  PostAudience @default(PUBLIC)
+  content   String
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  deletedAt DateTime?
+
+  comments      Comment[]
+  reactions     Reaction[]
+  media         MediaAsset[]
+  feedEntries   FeedEntry[]
+  notifications Notification[]
+  savedBy       SavedItem[]
+
+  @@index([authorId, createdAt])
+  @@index([audience, createdAt])
+}
+
+model Comment {
+  id        String    @id @default(cuid())
+  postId    String
+  post      Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  content   String
+  parentId  String?
+  parent    Comment?  @relation("CommentThread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies   Comment[] @relation("CommentThread")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  reactions Reaction[]
+
+  @@index([postId, createdAt])
+}
+
+enum ReactionType {
+  LIKE
+  LOVE
+  HAHA
+  WOW
+  SAD
+  ANGRY
+}
+
+model Reaction {
+  id        String       @id @default(cuid())
+  userId    String
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postId    String?
+  post      Post?        @relation(fields: [postId], references: [id], onDelete: Cascade)
+  commentId String?
+  comment   Comment?     @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  type      ReactionType @default(LIKE)
+  createdAt DateTime     @default(now())
+
+  @@unique([userId, postId, type])
+  @@unique([userId, commentId, type])
+  @@index([postId])
+  @@index([commentId])
+}
+
+// ---------- Stories (ephemeral 24h) ----------
+
+model Story {
+  id           String     @id @default(cuid())
+  authorId     String
+  author       User       @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  mediaAssetId String     @unique
+  media        MediaAsset @relation(fields: [mediaAssetId], references: [id], onDelete: Cascade)
+  caption      String?
+  expiresAt    DateTime
+  createdAt    DateTime   @default(now())
+
+  views StoryView[]
+
+  @@index([authorId, createdAt])
+  @@index([expiresAt])
+}
+
+model StoryView {
+  storyId  String
+  story    Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  viewerId String
+  viewer   User     @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+  viewedAt DateTime @default(now())
+
+  @@id([storyId, viewerId])
+}
+
+// ---------- Media (metadata only; bytes via presigned S3/R2) ----------
+
+enum MediaStatus {
+  PENDING
+  READY
+  FAILED
+}
+
+enum MediaKind {
+  IMAGE
+  VIDEO
+  AVATAR
+  COVER
+  STORY
+  REEL
+}
+
+model MediaAsset {
+  id          String      @id @default(cuid())
+  ownerId     String
+  owner       User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  postId      String?
+  post        Post?       @relation(fields: [postId], references: [id], onDelete: SetNull)
+  storageKey  String      @unique
+  mimeType    String
+  byteSize    Int
+  width       Int?
+  height      Int?
+  durationSec Int?
+  kind        MediaKind   @default(IMAGE)
+  status      MediaStatus @default(PENDING)
+  createdAt   DateTime    @default(now())
+
+  story          Story?
+  avatarProfiles Profile[] @relation("AvatarMedia")
+  coverProfiles  Profile[] @relation("CoverMedia")
+
+  @@index([ownerId])
+  @@index([postId])
+}
+
+// ---------- Feed (DB fallback; hot reads from Redis ZSET) ----------
+
+model FeedEntry {
+  id        String   @id @default(cuid())
+  ownerId   String
+  owner     User     @relation("FeedOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation("FeedAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  score     Float    @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([ownerId, postId])
+  @@index([ownerId, createdAt])
+}
+
+// ---------- Notifications ----------
+
+enum NotificationType {
+  FRIEND_REQUEST
+  FRIEND_ACCEPTED
+  POST_LIKE
+  POST_COMMENT
+  COMMENT_REPLY
+  MENTION
+  SYSTEM
+}
+
+model Notification {
+  id          String           @id @default(cuid())
+  recipientId String
+  recipient   User             @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  actorId     String?
+  actor       User?            @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+  type        NotificationType
+  postId      String?
+  post        Post?            @relation(fields: [postId], references: [id], onDelete: SetNull)
+  readAt      DateTime?
+  createdAt   DateTime         @default(now())
+
+  @@index([recipientId, createdAt])
+  @@index([recipientId, readAt])
+}
+
+// ---------- Messaging (HTTP history; live delivery via realtime) ----------
+
+model Conversation {
+  id           String                    @id @default(cuid())
+  createdAt    DateTime                  @default(now())
+  updatedAt    DateTime                  @updatedAt
+  participants ConversationParticipant[]
+  messages     Message[]
+}
+
+model ConversationParticipant {
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  joinedAt       DateTime     @default(now())
+  leftAt         DateTime?
+  lastReadAt     DateTime?
+
+  @@id([conversationId, userId])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String
+  sender         User         @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  body           String
+  createdAt      DateTime     @default(now())
+  deletedAt      DateTime?
+
+  @@index([conversationId, createdAt])
+}
+
+// ---------- Groups / pages (stage 2) ----------
+
+model Group {
+  id          String        @id @default(cuid())
+  name        String
+  description String?
+  ownerId     String
+  owner       User          @relation("GroupOwner", fields: [ownerId], references: [id])
+  createdAt   DateTime      @default(now())
+  members     GroupMember[]
+}
+
+model GroupMember {
+  groupId  String
+  group    Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role     String   @default("MEMBER")
+  joinedAt DateTime @default(now())
+
+  @@id([groupId, userId])
+}
+
+model Page {
+  id        String         @id @default(cuid())
+  title     String
+  slug      String         @unique
+  ownerId   String
+  owner     User           @relation("PageOwner", fields: [ownerId], references: [id])
+  createdAt DateTime       @default(now())
+  followers PageFollower[]
+}
+
+model PageFollower {
+  pageId    String
+  page      Page     @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([pageId, userId])
+}
+
+model SavedItem {
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([userId, postId])
+}
+
+// ---------- Moderation & audit ----------
+
+enum ReportStatus {
+  OPEN
+  REVIEWING
+  RESOLVED
+  DISMISSED
+}
+
+model Report {
+  id         String       @id @default(cuid())
+  reporterId String
+  reporter   User         @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+  targetType String
+  targetId   String
+  reason     String
+  status     ReportStatus @default(OPEN)
+  createdAt  DateTime     @default(now())
+  resolvedAt DateTime?
+
+  @@index([status, createdAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actor      User?    @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  action     String
+  targetType String?
+  targetId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([action, createdAt])
+}

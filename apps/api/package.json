@@ -1,0 +1,28 @@
+{
+  "name": "@hestia/api",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.0",
+    "@fastify/rate-limit": "^9.0.0",
+    "@hestia/auth": "workspace:*",
+    "@hestia/cache": "workspace:*",
+    "@hestia/contracts": "workspace:*",
+    "@hestia/database": "workspace:*",
+    "@hestia/env": "workspace:*",
+    "@hestia/storage": "workspace:*",
+    "@prisma/client": "^5.14.0",
+    "fastify": "^4.26.0",
+    "pino": "^9.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "vitest": "^5.0.4"
+  }
+}
